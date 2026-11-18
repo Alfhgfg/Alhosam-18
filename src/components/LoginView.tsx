@@ -1,18 +1,236 @@
 import React, { useState } from 'react';
 import {
+  Activity,
+  AlertTriangle,
   Ban,
+  Check,
+  ChevronDown,
+  ChevronUp,
   Clock,
+  Copy,
   Laptop,
   LogOut,
   Pencil,
+  RefreshCw,
   ShieldAlert,
   Smartphone,
   Store,
   Tablet,
-  Check,
+  Trash2,
 } from 'lucide-react';
 import { useAuth } from '../contexts/AuthContext';
+import { auth } from '../firebase';
+import {
+  formatDiagnosticReport,
+  stageLabelAr,
+  type AuthUserSnapshot,
+} from '../utils/authDiagnostics';
 import { deviceTypeLabel } from '../utils/device';
+
+function formatUserSnap(snap: AuthUserSnapshot | null): string {
+  if (!snap) return 'لم يُفحص بعد';
+  if (!snap.present) return 'null (غير مسجل)';
+  return `${snap.email || snap.uid} · verified=${snap.emailVerified ? 'نعم' : 'لا'}`;
+}
+
+const AuthDiagnosticsPanel: React.FC<{ defaultOpen?: boolean }> = ({
+  defaultOpen = false,
+}) => {
+  const {
+    firebaseUser,
+    profile,
+    loading,
+    isAdmin,
+    isActiveStaff,
+    isDeviceBlocked,
+    authError,
+    diagnostics,
+    clearDiagnostics,
+  } = useAuth();
+
+  const hasAutoAlert = Boolean(
+    diagnostics.lastFailure ||
+      authError ||
+      diagnostics.lastNullReason === 'unexpected_session_drop_to_null' ||
+      diagnostics.lastNullReason === 'redirect_returned_null'
+  );
+  const [manualOpen, setManualOpen] = useState<boolean | null>(null);
+  const [copied, setCopied] = useState(false);
+
+  const open = manualOpen !== null ? manualOpen : defaultOpen || hasAutoAlert;
+  const activeAuthCurrentUser = auth.currentUser;
+
+  const handleCopy = async () => {
+    const report = formatDiagnosticReport(diagnostics, {
+      loading,
+      hasContextUser: Boolean(firebaseUser),
+      hasAuthCurrentUser: Boolean(activeAuthCurrentUser),
+      isAdmin,
+      isActiveStaff,
+      isDeviceBlocked,
+      profileRole: profile?.role ?? null,
+      profileStatus: profile?.status ?? null,
+    });
+    try {
+      await navigator.clipboard.writeText(report);
+      setCopied(true);
+      setTimeout(() => setCopied(false), 2500);
+    } catch {
+      // ignore clipboard errors on restricted contexts
+    }
+  };
+
+  return (
+    <div className="border border-slate-200 rounded-xl bg-slate-50/90 text-right overflow-hidden">
+      <button
+        type="button"
+        onClick={() => setManualOpen(!open)}
+        className="w-full px-3.5 py-2.5 flex items-center justify-between gap-2 text-xs font-semibold text-slate-700 hover:bg-slate-100/80 transition-colors cursor-pointer"
+      >
+        <span className="inline-flex items-center gap-2">
+          <Activity
+            className={`w-4 h-4 ${
+              diagnostics.lastFailure ? 'text-red-600' : 'text-emerald-700'
+            }`}
+          />
+          <span>
+            شاشة تشخيص تسجيل الدخول ({diagnostics.events.length} حدث)
+          </span>
+          {diagnostics.lastFailure && (
+            <span className="px-2 py-0.5 rounded-md bg-red-100 text-red-700 font-mono-num text-[10px]">
+              {diagnostics.lastFailure.code}
+            </span>
+          )}
+        </span>
+        {open ? (
+          <ChevronUp className="w-4 h-4 text-slate-500" />
+        ) : (
+          <ChevronDown className="w-4 h-4 text-slate-500" />
+        )}
+      </button>
+
+      {open && (
+        <div className="border-t border-slate-200 p-3.5 space-y-3 text-xs">
+          {diagnostics.lastFailure && (
+            <div className="p-3 rounded-lg bg-red-50 border border-red-200 text-red-800 space-y-1">
+              <div className="font-bold flex items-center justify-between gap-2">
+                <span>
+                  مرحلة الفشل: {stageLabelAr(diagnostics.lastFailure.stage)} (
+                  <span className="font-mono-num" dir="ltr">
+                    {diagnostics.lastFailure.stage}
+                  </span>
+                  )
+                </span>
+                <span className="font-mono-num px-1.5 py-0.5 bg-red-100 rounded text-[11px]" dir="ltr">
+                  {diagnostics.lastFailure.code}
+                </span>
+              </div>
+              <div className="leading-relaxed">{diagnostics.lastFailure.message}</div>
+            </div>
+          )}
+
+          <div className="grid grid-cols-1 sm:grid-cols-2 gap-2 text-[11px]">
+            <div className="bg-white border border-slate-200 rounded-lg p-2.5 space-y-1">
+              <div className="text-slate-400 font-medium">Firebase currentUser (قبل)</div>
+              <div className="font-mono-num text-slate-800 break-all" dir="ltr">
+                {formatUserSnap(diagnostics.currentUserBefore)}
+              </div>
+            </div>
+            <div className="bg-white border border-slate-200 rounded-lg p-2.5 space-y-1">
+              <div className="text-slate-400 font-medium">Firebase currentUser (الآن / بعد)</div>
+              <div className="font-mono-num text-slate-800 break-all" dir="ltr">
+                {activeAuthCurrentUser
+                  ? `${activeAuthCurrentUser.email || activeAuthCurrentUser.uid} · verified=${activeAuthCurrentUser.emailVerified ? 'نعم' : 'لا'}`
+                  : formatUserSnap(diagnostics.currentUserAfter)}
+              </div>
+            </div>
+            <div className="bg-white border border-slate-200 rounded-lg p-2.5 space-y-1">
+              <div className="text-slate-400 font-medium">آخر حالة onAuthStateChanged</div>
+              <div className="font-mono-num text-slate-800 break-all" dir="ltr">
+                {formatUserSnap(diagnostics.lastAuthStateUser)}
+              </div>
+            </div>
+            <div className="bg-white border border-slate-200 rounded-lg p-2.5 space-y-1">
+              <div className="text-slate-400 font-medium">حالة التحقق والبوابة</div>
+              <div className="font-mono-num text-slate-800" dir="ltr">
+                {`env=${diagnostics.platform} | isAdmin=${isAdmin} | active=${isActiveStaff} | role=${profile?.role ?? 'none'}/${profile?.status ?? 'none'}`}
+              </div>
+              {diagnostics.lastNullReason && (
+                <div className="text-amber-700 font-mono-num" dir="ltr">
+                  nullReason={diagnostics.lastNullReason}
+                </div>
+              )}
+            </div>
+          </div>
+
+          <div className="space-y-1.5">
+            <div className="flex items-center justify-between">
+              <span className="font-semibold text-slate-700 text-[11px]">
+                تتبع خطوات Google Sign-In والمصادقة (دون كشف أي رموز سرية)
+              </span>
+              <div className="flex items-center gap-2">
+                <button
+                  type="button"
+                  onClick={handleCopy}
+                  className="inline-flex items-center gap-1 px-2 py-1 rounded bg-white border border-slate-200 text-slate-700 hover:bg-slate-100 text-[11px] cursor-pointer"
+                >
+                  <Copy className="w-3 h-3" />
+                  <span>{copied ? 'تم النسخ' : 'نسخ التقرير'}</span>
+                </button>
+                <button
+                  type="button"
+                  onClick={clearDiagnostics}
+                  className="inline-flex items-center gap-1 px-2 py-1 rounded bg-white border border-slate-200 text-slate-600 hover:text-red-700 text-[11px] cursor-pointer"
+                >
+                  <Trash2 className="w-3 h-3" />
+                  <span>مسح</span>
+                </button>
+              </div>
+            </div>
+
+            <div className="bg-white border border-slate-200 rounded-lg max-h-52 overflow-y-auto divide-y divide-slate-100">
+              {diagnostics.events.length === 0 ? (
+                <div className="p-3 text-center text-slate-400 text-[11px]">
+                  لم تُسجل أحداث بعد. اضغط زر الدخول لتتبع جميع المراحل.
+                </div>
+              ) : (
+                [...diagnostics.events].reverse().map((ev) => (
+                  <div key={ev.id} className="p-2.5 text-[11px] space-y-0.5">
+                    <div className="flex items-center justify-between gap-2">
+                      <span
+                        className={`font-semibold ${
+                          ev.level === 'error'
+                            ? 'text-red-700'
+                            : ev.level === 'warn'
+                            ? 'text-amber-700'
+                            : ev.level === 'ok'
+                            ? 'text-emerald-700'
+                            : 'text-slate-700'
+                        }`}
+                      >
+                        {stageLabelAr(ev.stage)}
+                      </span>
+                      <span className="font-mono-num text-[10px] text-slate-400" dir="ltr">
+                        {ev.atIso.slice(11, 19)}
+                      </span>
+                    </div>
+                    <div className="text-slate-700 leading-relaxed">{ev.summary}</div>
+                    {(ev.code || ev.details) && (
+                      <div className="font-mono-num text-[10px] text-slate-500 break-all" dir="ltr">
+                        {ev.code ? `[${ev.code}] ` : ''}
+                        {ev.details || ''}
+                      </div>
+                    )}
+                  </div>
+                ))
+              )}
+            </div>
+          </div>
+        </div>
+      )}
+    </div>
+  );
+};
 
 export const LoginView: React.FC = () => {
   const {
@@ -21,6 +239,8 @@ export const LoginView: React.FC = () => {
     loading,
     signingIn,
     authError,
+    isAdmin,
+    isActiveStaff,
     isDeviceBlocked,
     deviceIdentity,
     deviceRecord,
@@ -33,6 +253,9 @@ export const LoginView: React.FC = () => {
   const [editingDevice, setEditingDevice] = useState(false);
   const [deviceDraft, setDeviceDraft] = useState(deviceIdentity.deviceName);
   const [savingDevice, setSavingDevice] = useState(false);
+
+  // Never fall back to the sign-in screen when a valid Firebase session exists
+  const activeSessionUser = firebaseUser ?? auth.currentUser;
 
   const DeviceIcon =
     deviceIdentity.deviceType === 'mobile'
@@ -56,18 +279,19 @@ export const LoginView: React.FC = () => {
   if (loading) {
     return (
       <div className="min-h-[100dvh] bg-slate-50 flex items-center justify-center p-4 sm:p-6">
-        <div className="bg-white border border-slate-200 rounded-xl p-8 max-w-md w-full text-center space-y-3">
+        <div className="bg-white border border-slate-200 rounded-xl p-8 max-w-lg w-full text-center space-y-4">
           <div className="w-10 h-10 border-2 border-emerald-600 border-t-transparent rounded-full animate-spin mx-auto" />
           <p className="text-slate-700 font-medium">جاري التحقق من الحساب والصلاحيات والجهاز...</p>
+          <AuthDiagnosticsPanel />
         </div>
       </div>
     );
   }
 
-  if (firebaseUser && isDeviceBlocked) {
+  if (activeSessionUser && isDeviceBlocked) {
     return (
       <div className="min-h-screen bg-slate-50 flex items-center justify-center p-6">
-        <div className="bg-white border border-red-200 rounded-xl p-8 max-w-md w-full space-y-5 text-center">
+        <div className="bg-white border border-red-200 rounded-xl p-8 max-w-lg w-full space-y-5 text-center">
           <div className="w-12 h-12 rounded-xl bg-red-50 border border-red-200 text-red-600 flex items-center justify-center mx-auto">
             <Ban className="w-6 h-6" />
           </div>
@@ -84,6 +308,7 @@ export const LoginView: React.FC = () => {
               معرّف الجهاز: {deviceIdentity.deviceId}
             </div>
           </div>
+          <AuthDiagnosticsPanel />
           <button
             onClick={logout}
             className="w-full inline-flex items-center justify-center gap-2 px-4 py-2.5 bg-slate-900 text-white text-sm font-medium rounded-lg hover:bg-slate-800 transition-colors cursor-pointer"
@@ -96,10 +321,10 @@ export const LoginView: React.FC = () => {
     );
   }
 
-  if (firebaseUser && profile && profile.status === 'suspended') {
+  if (activeSessionUser && profile && profile.status === 'suspended') {
     return (
       <div className="min-h-screen bg-slate-50 flex items-center justify-center p-6">
-        <div className="bg-white border border-slate-200 rounded-xl p-8 max-w-md w-full space-y-5 text-center">
+        <div className="bg-white border border-slate-200 rounded-xl p-8 max-w-lg w-full space-y-5 text-center">
           <div className="w-12 h-12 rounded-xl bg-red-50 border border-red-200 text-red-600 flex items-center justify-center mx-auto">
             <ShieldAlert className="w-6 h-6" />
           </div>
@@ -109,6 +334,7 @@ export const LoginView: React.FC = () => {
               حسابك ({profile.email}) موقوف حالياً من قبل مسؤول النظام في بقالة الحسام. يرجى التواصل مع الإدارة لتفعيل الصلاحية.
             </p>
           </div>
+          <AuthDiagnosticsPanel />
           <button
             onClick={logout}
             className="w-full inline-flex items-center justify-center gap-2 px-4 py-2.5 bg-slate-900 text-white text-sm font-medium rounded-lg hover:bg-slate-800 transition-colors cursor-pointer"
@@ -121,10 +347,10 @@ export const LoginView: React.FC = () => {
     );
   }
 
-  if (firebaseUser && profile && profile.status === 'pending') {
+  if (activeSessionUser && profile && profile.status === 'pending') {
     return (
       <div className="min-h-screen bg-slate-50 flex items-center justify-center p-6">
-        <div className="bg-white border border-slate-200 rounded-xl p-8 max-w-md w-full space-y-5 text-center">
+        <div className="bg-white border border-slate-200 rounded-xl p-8 max-w-lg w-full space-y-5 text-center">
           <div className="w-12 h-12 rounded-xl bg-amber-50 border border-amber-200 text-amber-700 flex items-center justify-center mx-auto">
             <Clock className="w-6 h-6" />
           </div>
@@ -182,31 +408,43 @@ export const LoginView: React.FC = () => {
             )}
           </div>
 
-          <button
-            onClick={logout}
-            className="w-full inline-flex items-center justify-center gap-2 px-4 py-2.5 bg-slate-900 text-white text-sm font-medium rounded-lg hover:bg-slate-800 transition-colors cursor-pointer"
-          >
-            <LogOut className="w-4 h-4" />
-            <span>تسجيل الخروج</span>
-          </button>
+          <AuthDiagnosticsPanel />
+
+          <div className="space-y-2.5">
+            <button
+              type="button"
+              onClick={retryProfileSync}
+              className="w-full inline-flex items-center justify-center gap-2 px-4 py-2.5 bg-emerald-700 text-white text-sm font-semibold rounded-lg hover:bg-emerald-800 transition-colors cursor-pointer"
+            >
+              <RefreshCw className="w-4 h-4" />
+              <span>تحديث حالة الصلاحية</span>
+            </button>
+            <button
+              onClick={logout}
+              className="w-full inline-flex items-center justify-center gap-2 px-4 py-2.5 bg-slate-900 text-white text-sm font-medium rounded-lg hover:bg-slate-800 transition-colors cursor-pointer"
+            >
+              <LogOut className="w-4 h-4" />
+              <span>تسجيل الخروج</span>
+            </button>
+          </div>
         </div>
       </div>
     );
   }
 
-  if (firebaseUser && !profile) {
+  if (activeSessionUser && !profile) {
     return (
       <div className="min-h-screen bg-slate-50 flex items-center justify-center p-6">
-        <div className="bg-white border border-slate-200 rounded-xl p-8 max-w-md w-full space-y-5 text-center">
+        <div className="bg-white border border-slate-200 rounded-xl p-8 max-w-lg w-full space-y-5 text-center">
           <div className="w-12 h-12 rounded-xl bg-amber-50 border border-amber-200 text-amber-700 flex items-center justify-center mx-auto">
             <Clock className="w-6 h-6" />
           </div>
           <div className="space-y-2">
             <h1 className="text-xl font-bold text-slate-900">استكمال التحقق من الحساب</h1>
             <p className="text-sm text-slate-600 leading-relaxed">
-              تم تسجيل دخولك عبر{' '}
+              جلسة Firebase نشطة عبر{' '}
               <span className="font-mono-num font-semibold text-slate-900" dir="ltr">
-                {firebaseUser.email}
+                {activeSessionUser.email || activeSessionUser.uid}
               </span>
               .
             </p>
@@ -216,13 +454,68 @@ export const LoginView: React.FC = () => {
               </div>
             )}
           </div>
+          <AuthDiagnosticsPanel defaultOpen />
           <div className="space-y-2.5">
             <button
               type="button"
               onClick={retryProfileSync}
               className="w-full inline-flex items-center justify-center gap-2 px-4 py-2.5 bg-emerald-700 text-white text-sm font-semibold rounded-lg hover:bg-emerald-800 transition-colors cursor-pointer"
             >
+              <RefreshCw className="w-4 h-4" />
               <span>إعادة التحقق والمزامنة</span>
+            </button>
+            <button
+              type="button"
+              onClick={logout}
+              className="w-full inline-flex items-center justify-center gap-2 px-4 py-2.5 bg-slate-900 text-white text-sm font-medium rounded-lg hover:bg-slate-800 transition-colors cursor-pointer"
+            >
+              <LogOut className="w-4 h-4" />
+              <span>تسجيل الخروج</span>
+            </button>
+          </div>
+        </div>
+      </div>
+    );
+  }
+
+  // CRITICAL GUARD: Never show the Google Sign-In form while a valid Firebase session exists!
+  if (activeSessionUser) {
+    return (
+      <div className="min-h-screen bg-slate-50 flex items-center justify-center p-6">
+        <div className="bg-white border border-amber-200 rounded-xl p-8 max-w-lg w-full space-y-5 text-center">
+          <div className="w-12 h-12 rounded-xl bg-amber-50 border border-amber-200 text-amber-700 flex items-center justify-center mx-auto">
+            <AlertTriangle className="w-6 h-6" />
+          </div>
+          <div className="space-y-2">
+            <h1 className="text-xl font-bold text-slate-900">
+              جلسة Firebase نشطة — يتعذر فتح الشاشة الرئيسية
+            </h1>
+            <p className="text-sm text-slate-600 leading-relaxed">
+              تم تسجيل الدخول بالحساب{' '}
+              <span className="font-mono-num font-semibold text-slate-900" dir="ltr">
+                {activeSessionUser.email || activeSessionUser.uid}
+              </span>{' '}
+              ولم تُستوفَ شروط بوابة الدخول بعد (
+              <span className="font-mono-num" dir="ltr">
+                {`role=${profile?.role ?? 'none'}, status=${profile?.status ?? 'none'}, isAdmin=${isAdmin}, isActiveStaff=${isActiveStaff}`}
+              </span>
+              ). تم إبقاء جلستك نشطة دون إرجاعك لشاشة الدخول.
+            </p>
+            {authError && (
+              <div className="p-3 rounded-lg bg-red-50 border border-red-200 text-red-700 text-xs text-right leading-relaxed">
+                {authError}
+              </div>
+            )}
+          </div>
+          <AuthDiagnosticsPanel defaultOpen />
+          <div className="space-y-2.5">
+            <button
+              type="button"
+              onClick={retryProfileSync}
+              className="w-full inline-flex items-center justify-center gap-2 px-4 py-2.5 bg-emerald-700 text-white text-sm font-semibold rounded-lg hover:bg-emerald-800 transition-colors cursor-pointer"
+            >
+              <RefreshCw className="w-4 h-4" />
+              <span>إعادة مزامنة الصلاحيات</span>
             </button>
             <button
               type="button"
@@ -306,7 +599,7 @@ export const LoginView: React.FC = () => {
           </div>
 
           {authError && (
-            <div className="p-3.5 rounded-lg bg-red-50 border border-red-200 text-red-700 text-sm">
+            <div className="p-3.5 rounded-lg bg-red-50 border border-red-200 text-red-700 text-sm leading-relaxed">
               {authError}
             </div>
           )}
@@ -335,6 +628,8 @@ export const LoginView: React.FC = () => {
             )}
           </button>
         </div>
+
+        <AuthDiagnosticsPanel />
 
         <div className="border-t border-slate-100 pt-5 grid grid-cols-3 gap-4 text-center text-xs text-slate-500">
           <div>مزامنة سحابية فورية</div>
