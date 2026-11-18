@@ -163,6 +163,20 @@ const AuthDiagnosticsPanel: React.FC<{ defaultOpen?: boolean }> = ({
             </div>
           </div>
 
+          {diagnostics.nativeAndroid && (
+            <div className="bg-white border border-slate-200 rounded-lg p-2.5 space-y-1 text-[11px]">
+              <div className="font-semibold text-slate-700">
+                فحص شهادة التطبيق وإعدادات Google على Android
+              </div>
+              <div className="font-mono-num text-slate-700 break-all space-y-0.5" dir="ltr">
+                <div>{`pkg=${diagnostics.nativeAndroid.packageName} v${diagnostics.nativeAndroid.versionName}(${diagnostics.nativeAndroid.versionCode}) | launchMode=${diagnostics.nativeAndroid.launchMode ?? 'unknown'}`}</div>
+                <div>{`SHA-1=${diagnostics.nativeAndroid.signingSha1 ?? 'unknown'}`}</div>
+                <div>{`PlayServices=${diagnostics.nativeAndroid.playServicesInstalled ? diagnostics.nativeAndroid.playServicesVersion : 'missing'} | default_web_client_id=${diagnostics.nativeAndroid.hasDefaultWebClientIdRes} (matches=${diagnostics.nativeAndroid.defaultWebClientIdMatches})`}</div>
+                <div>{`SocialLoginLoaded=${diagnostics.nativeAndroid.socialLoginPluginLoaded} | ModifiedMainActivity=${diagnostics.nativeAndroid.implementsModifiedMainActivity}`}</div>
+              </div>
+            </div>
+          )}
+
           <div className="space-y-1.5">
             <div className="flex items-center justify-between">
               <span className="font-semibold text-slate-700 text-[11px]">
@@ -244,6 +258,7 @@ export const LoginView: React.FC = () => {
     isDeviceBlocked,
     deviceIdentity,
     deviceRecord,
+    diagnostics,
     signInWithGoogle,
     retryProfileSync,
     logout,
@@ -606,7 +621,7 @@ export const LoginView: React.FC = () => {
 
           <button
             type="button"
-            onClick={signInWithGoogle}
+            onClick={() => signInWithGoogle('bottom')}
             disabled={signingIn}
             className="w-full flex items-center justify-center gap-3 px-5 py-3 bg-emerald-700 hover:bg-emerald-800 disabled:opacity-60 disabled:cursor-not-allowed text-white font-semibold text-sm rounded-xl transition-colors cursor-pointer"
           >
@@ -627,6 +642,19 @@ export const LoginView: React.FC = () => {
               </>
             )}
           </button>
+
+          {diagnostics.platform === 'capacitor-native' &&
+            diagnostics.lastFailure?.code === 'USER_CANCELLED' && (
+              <button
+                type="button"
+                onClick={() => signInWithGoogle('standard')}
+                disabled={signingIn}
+                className="w-full flex items-center justify-center gap-2 px-4 py-2.5 bg-slate-100 hover:bg-slate-200 disabled:opacity-60 text-slate-800 font-medium text-xs rounded-xl border border-slate-200 transition-colors cursor-pointer"
+              >
+                <RefreshCw className="w-3.5 h-3.5" />
+                <span>إعادة المحاولة بنافذة Google القياسية (Standard UI)</span>
+              </button>
+            )}
         </div>
 
         <AuthDiagnosticsPanel />

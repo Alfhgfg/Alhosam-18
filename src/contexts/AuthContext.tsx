@@ -49,15 +49,19 @@ import {
   consumeRedirectPending,
   createInitialDiagnostics,
   extractErrorCode,
+  extractGoogleTokensFromLoginResult,
   hasRedirectPending,
+  inspectIdTokenClaimsSafely,
   loadAuthDiagnostics,
   markRedirectPending,
   persistAuthDiagnostics,
+  readNativeAndroidDiagnostics,
   sanitizeDiagnosticText,
   snapshotFirebaseUser,
   type AuthDiagnosticState,
   type AuthTraceLevel,
   type AuthTraceStage,
+  type NativeAndroidDiagInfo,
 } from '../utils/authDiagnostics';
 import {
   getLocalDeviceIdentity,
@@ -80,7 +84,7 @@ interface AuthContextValue {
   actorInfo: ActorInfo | null;
   diagnostics: AuthDiagnosticState;
   clearDiagnostics: () => void;
-  signInWithGoogle: () => Promise<void>;
+  signInWithGoogle: (preferredStyle?: 'bottom' | 'standard') => Promise<void>;
   retryProfileSync: () => Promise<void>;
   logout: () => Promise<void>;
   hasPermission: (perm: keyof UserProfile['permissions']) => boolean;
@@ -161,6 +165,7 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({
       opts?: {
         code?: string;
         details?: string;
+        nativeAndroid?: NativeAndroidDiagInfo | null;
         currentUserBefore?: User | null;
         currentUserAfter?: User | null;
         lastAuthStateUser?: User | null;
@@ -177,6 +182,9 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({
           code: opts?.code,
           details: opts?.details,
         });
+        if (opts && 'nativeAndroid' in opts) {
+          next = { ...next, nativeAndroid: opts.nativeAndroid ?? null };
+        }
         if (opts && 'currentUserBefore' in opts) {
           next = { ...next, currentUserBefore: snapshotFirebaseUser(opts.currentUserBefore) };
         }
@@ -251,9 +259,13 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({
 
   useEffect(() => {
     testConnection();
+    const nativeInfo = isNative ? readNativeAndroidDiagnostics() : null;
     logDiag('mount_init', 'info', 'فحص الحالة الأولية عند تشغيل التطبيق', {
+      nativeAndroid: nativeInfo,
       currentUserBefore: auth.currentUser,
-      details: `platform=${isNative ? 'capacitor-native' : 'web'}, redirectPending=${redirectWasPendingRef.current}`,
+      details: nativeInfo
+        ? `platform=capacitor-native, pkg=${nativeInfo.packageName}, sha1=${nativeInfo.signingSha1 ?? 'unknown'}, gms=${nativeInfo.playServicesInstalled}(${nativeInfo.playServicesVersion ?? 'none'}), webIdRes=${nativeInfo.hasDefaultWebClientIdRes}(match=${nativeInfo.defaultWebClientIdMatches}), launchMode=${nativeInfo.launchMode ?? 'unknown'}`
+        : `platform=${isNative ? 'capacitor-native' : 'web'}, redirectPending=${redirectWasPendingRef.current}`,
     });
 
     if (!Capacitor.isNativePlatform()) {
@@ -984,13 +996,17 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({
     [actorInfo, isActiveStaff, deviceRecord, deviceIdentity.deviceId]
   );
 
-  const signInWithGoogle = async () => {
+  const signInWithGoogle = async (preferredStyle?: 'bottom' | 'standard') => {
     if (signingIn) return;
+    const styleMode: 'bottom' | 'standard' = preferredStyle === 'standard' ? 'standard' : 'bottom';
     setAuthError(null);
     setSigningIn(true);
     signInAttemptActiveRef.current = true;
 
+    const nativeDiag = Capacitor.isNativePlatform() ? readNativeAndroidDiagnostics() : null;
+
     logDiag('button_click', 'info', 'ضغط المستخدم على زر الدخول بحساب Google', {
+      nativeAndroid: nativeDiag,
       currentUserBefore: auth.currentUser,
       clearFailure: true,
     });
@@ -999,7 +1015,9 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({
       'info',
       `بيئة التشغيل: ${Capacitor.isNativePlatform() ? 'Capacitor Native (Android/iOS)' : 'Web Browser'}`,
       {
-        details: `isNative=${Capacitor.isNativePlatform()}, platform=${Capacitor.getPlatform()}`,
+        details: nativeDiag
+          ? `isNative=true, style=${styleMode}, pkg=${nativeDiag.packageName}, sha1=${nativeDiag.signingSha1 ?? 'unknown'}, gms=${nativeDiag.playServicesInstalled}(${nativeDiag.playServicesVersion ?? 'none'}), webIdResMatch=${nativeDiag.defaultWebClientIdMatches}`
+          : `isNative=${Capacitor.isNativePlatform()}, platform=${Capacitor.getPlatform()}`,
       }
     );
 
@@ -1008,51 +1026,80 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({
         console.info('[AlHussamAuth] Initializing native SocialLogin...');
         await ensureNativeGoogleInitialized();
 
-        logDiag('native_login', 'info', 'فتح نافذة اختيار حساب Google عبر SocialLogin.login');
-        console.info('[AlHussamAuth] Opening native Google account picker...');
+        const loginOptions =
+          styleMode === 'bottom'
+            ? {
+                style: 'bottom' as const,
+                filterByAuthorizedAccounts: false,
+                autoSelectEnabled: false,
+              }
+            : {
+                style: 'standard' as const,
+              };
+
+        logDiag('native_login', 'info', `فتح نافذة اختيار حساب Google عبر Credential Manager (${styleMode})`, {
+          details: `style=${styleMode}, filterByAuthorizedAccounts=false, autoSelectEnabled=false, skipAuthOnlyAuthorizationAfterSignIn=true, webClientIdSuffix=...${GOOGLE_WEB_CLIENT_ID.slice(-24)}`,
+        });
+        console.info('[AlHussamAuth] Opening native Google account picker...', loginOptions);
         const res = await SocialLogin.login({
           provider: 'google',
-          options: {
-            style: 'standard',
-          },
+          options: loginOptions,
         });
 
-        const hasIdToken = Boolean(res?.result && 'idToken' in res.result && res.result.idToken);
-        const hasAccessToken = Boolean(
-          res?.result && 'accessToken' in res.result && res.result.accessToken?.token
-        );
+        const extracted = extractGoogleTokensFromLoginResult(res);
+        const claims = inspectIdTokenClaimsSafely(extracted.idToken, GOOGLE_WEB_CLIENT_ID);
 
         console.info(
           '[AlHussamAuth] SocialLogin returned:',
-          res?.result?.responseType,
+          extracted.responseType,
           'hasIdToken=',
-          hasIdToken
+          Boolean(extracted.idToken),
+          'audMatch=',
+          claims.audMatchesExpected
         );
 
         logDiag(
           'native_login',
-          hasIdToken ? 'ok' : 'error',
-          `استجابة SocialLogin.login: responseType=${res?.result?.responseType ?? 'unknown'}, hasIdToken=${hasIdToken}, hasAccessToken=${hasAccessToken}`,
+          extracted.idToken && claims.validFormat && claims.audMatchesExpected ? 'ok' : 'error',
+          `استجابة SocialLogin.login: responseType=${extracted.responseType ?? 'unknown'}, hasIdToken=${Boolean(extracted.idToken)}, hasAccessToken=${Boolean(extracted.accessToken)}`,
           {
-            code: hasIdToken ? undefined : 'MISSING_ID_TOKEN',
-            failureMessage: hasIdToken
-              ? undefined
-              : 'لم يتم استلام رمز التحقق (ID Token) من حساب Google.',
+            code: !extracted.idToken
+              ? 'MISSING_ID_TOKEN'
+              : !claims.validFormat
+              ? 'INVALID_ID_TOKEN_FORMAT'
+              : !claims.audMatchesExpected
+              ? 'ID_TOKEN_AUDIENCE_MISMATCH'
+              : undefined,
+            details: `jwtValid=${claims.validFormat}, audMatch=${claims.audMatchesExpected}, iss=${claims.iss ?? 'none'}, email=${claims.email ?? extracted.profileEmail ?? 'none'}, emailVerified=${claims.emailVerified}, expired=${claims.expired}`,
+            failureMessage: !extracted.idToken
+              ? 'لم يتم استلام رمز التحقق (ID Token) من حساب Google.'
+              : !claims.validFormat
+              ? 'رمز التحقق (ID Token) المستلم من Google غير صالح البنية.'
+              : !claims.audMatchesExpected
+              ? 'معرّف الجمهور (aud) داخل ID Token لا يطابق Web Client ID الخاص بمشروع Firebase.'
+              : undefined,
           }
         );
 
-        if (res.result.responseType !== 'online' || !res.result.idToken) {
-          setAuthError('لم يتم استلام رمز التحقق (ID Token) من حساب Google. يرجى المحاولة مرة أخرى.');
+        if (extracted.responseType !== 'online' || !extracted.idToken || !claims.validFormat) {
+          setAuthError('لم يتم استلام رمز تحقق (ID Token) صالح من حساب Google. يرجى المحاولة مرة أخرى.');
+          return;
+        }
+
+        if (!claims.audMatchesExpected) {
+          setAuthError(
+            'معرّف Web Client ID داخل Google ID Token لا يطابق مشروع Firebase الحالي. تأكد من إعدادات Web Client ID.'
+          );
           return;
         }
 
         let credential;
         try {
           credential = GoogleAuthProvider.credential(
-            res.result.idToken,
-            res.result.accessToken?.token ?? undefined
+            extracted.idToken,
+            extracted.accessToken ?? undefined
           );
-          logDiag('credential_build', 'ok', 'تم إنشاء GoogleAuthProvider.credential بنجاح');
+          logDiag('credential_build', 'ok', 'تم إنشاء GoogleAuthProvider.credential بنجاح من idToken');
         } catch (credErr) {
           const credCode = extractErrorCode(credErr);
           logDiag('credential_build', 'error', `فشل إنشاء Credential: ${sanitizeDiagnosticText(credErr)}`, {
@@ -1130,10 +1177,14 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({
           lower.includes('cancelled') ||
           lower.includes('canceled');
 
+        const sha1Hint = nativeDiag?.signingSha1
+          ? ` (الحزمة: ${nativeDiag.packageName} · بصمة SHA-1 للتطبيق المثبت: ${nativeDiag.signingSha1})`
+          : '';
+
         let friendlyMsg = `تعذر إتمام تسجيل الدخول عبر Google على الهاتف (${code}): ${msg}`;
         if (isCancelled) {
           friendlyMsg =
-            'تم إلغاء أو إغلاق نافذة تسجيل الدخول قبل استلام الرمز (USER_CANCELLED). إذا حدث ذلك تلقائياً بعد اختيار الحساب، راجع تقرير التشخيص أدناه.';
+            `رفض أو ألغى Google Credential Manager العملية (USER_CANCELLED)${sha1Hint}. عند ظهور هذا الخطأ مباشرة بعد اختيار حساب Google دون إلغائك للنافذة، فالسبب الفعلي غالباً عدم تسجيل Android OAuth Client لبصمة SHA-1 الخاصة بالـ APK المثبت في Google Cloud / Firebase Console أو أن شاشة الموافقة في وضع Testing دون إضافة الحساب إلى Test users.`;
         } else if (
           lower.includes('developer_error') ||
           lower.includes('developer console') ||
@@ -1142,19 +1193,21 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({
           lower.includes('google cloud oauth is not configured')
         ) {
           friendlyMsg =
-            'فشل التحقق من إعدادات OAuth لتطبيق Android (DEVELOPER_ERROR). تأكد من تسجيل الحزمة com.alhussam.grocery وبصمتي SHA-1 و SHA-256 في Firebase Console.';
+            `فشل التحقق من إعدادات OAuth لتطبيق Android (DEVELOPER_ERROR)${sha1Hint}. تأكد من تسجيل الحزمة com.alhussam.grocery وبصمة SHA-1 في Firebase Console وGoogle Cloud OAuth.`;
         } else if (lower.includes('no credentials') || lower.includes('nocredential')) {
           friendlyMsg =
-            'لا يوجد حساب Google مسجل أو متاح على هذا الهاتف. يرجى إضافة حساب Google في إعدادات الجهاز وتحديث خدمات Google Play.';
+            'لا يوجد حساب Google متاح أو مهيأ في مدير الاعتمادات على هذا الهاتف. تأكد من وجود حساب Google فعّال وتحديث خدمات Google Play.';
         } else if (lower.includes('missing_web_client_id')) {
           friendlyMsg = 'معرّف Web Client ID غير مضبوط في إعدادات Firebase.';
         } else if (lower.includes('network')) {
           friendlyMsg = 'تعذر الاتصال بالإنترنت. يرجى التحقق من الشبكة والمحاولة مرة أخرى.';
         }
 
-        logDiag('native_login', isCancelled ? 'warn' : 'error', `فشل مسار Google على الهاتف: ${msg}`, {
+        logDiag('native_login', isCancelled ? 'warn' : 'error', `فشل مسار Google على الهاتف (${styleMode}): ${msg}`, {
           code,
+          nativeAndroid: nativeDiag,
           currentUserAfter: auth.currentUser,
+          details: `style=${styleMode}, pkg=${nativeDiag?.packageName ?? 'com.alhussam.grocery'}, sha1=${nativeDiag?.signingSha1 ?? 'unknown'}, gms=${nativeDiag?.playServicesInstalled ?? 'unknown'}, webIdRes=${nativeDiag?.hasDefaultWebClientIdRes ?? 'unknown'}`,
           failureMessage: friendlyMsg,
         });
         setAuthError(friendlyMsg);

@@ -49,14 +49,44 @@ export interface AuthFailureInfo {
   atIso: string;
 }
 
+export interface NativeAndroidDiagInfo {
+  packageName: string;
+  versionName: string;
+  versionCode: number;
+  signingSha1: string | null;
+  signingSha256: string | null;
+  playServicesInstalled: boolean;
+  playServicesVersion: string | null;
+  hasDefaultWebClientIdRes: boolean;
+  defaultWebClientIdMatches: boolean;
+  defaultWebClientIdSuffix: string | null;
+  hasGoogleAppIdRes: boolean;
+  launchMode: string | null;
+  socialLoginPluginLoaded: boolean;
+  implementsModifiedMainActivity: boolean;
+  error?: string;
+}
+
 export interface AuthDiagnosticState {
   platform: 'capacitor-native' | 'web';
+  nativeAndroid: NativeAndroidDiagInfo | null;
   currentUserBefore: AuthUserSnapshot | null;
   currentUserAfter: AuthUserSnapshot | null;
   lastAuthStateUser: AuthUserSnapshot | null;
   lastNullReason: string | null;
   lastFailure: AuthFailureInfo | null;
   events: AuthTraceEvent[];
+}
+
+export interface SafeIdTokenClaimsSummary {
+  validFormat: boolean;
+  aud: string | null;
+  audMatchesExpected: boolean;
+  iss: string | null;
+  email: string | null;
+  emailVerified: boolean | null;
+  expired: boolean | null;
+  expiresAtIso: string | null;
 }
 
 const DIAG_STORAGE_KEY = 'alhussam_auth_diag_v1';
@@ -96,6 +126,127 @@ export function extractErrorCode(err: unknown): string {
   return 'UNKNOWN_ERROR';
 }
 
+export function readNativeAndroidDiagnostics(): NativeAndroidDiagInfo | null {
+  try {
+    const w = globalThis as unknown as {
+      AndroidFileBridge?: { getGoogleAuthRuntimeDiagnostics?: () => string };
+    };
+    const getter = w?.AndroidFileBridge?.getGoogleAuthRuntimeDiagnostics;
+    if (typeof getter !== 'function') return null;
+    const raw = getter.call(w.AndroidFileBridge);
+    if (!raw || typeof raw !== 'string') return null;
+    return JSON.parse(raw) as NativeAndroidDiagInfo;
+  } catch {
+    return null;
+  }
+}
+
+export function extractGoogleTokensFromLoginResult(loginResponse: unknown): {
+  responseType: string | null;
+  idToken: string | null;
+  accessToken: string | null;
+  profileEmail: string | null;
+} {
+  if (!loginResponse || typeof loginResponse !== 'object') {
+    return { responseType: null, idToken: null, accessToken: null, profileEmail: null };
+  }
+  const result = (loginResponse as { result?: unknown }).result;
+  if (!result || typeof result !== 'object') {
+    return { responseType: null, idToken: null, accessToken: null, profileEmail: null };
+  }
+  const rec = result as {
+    responseType?: unknown;
+    idToken?: unknown;
+    accessToken?: { token?: unknown } | null;
+    profile?: { email?: unknown } | null;
+  };
+  const responseType = typeof rec.responseType === 'string' ? rec.responseType : null;
+  const idToken =
+    typeof rec.idToken === 'string' && rec.idToken.trim().length > 0 ? rec.idToken.trim() : null;
+  const accessToken =
+    rec.accessToken && typeof rec.accessToken.token === 'string' && rec.accessToken.token.trim().length > 0
+      ? rec.accessToken.token.trim()
+      : null;
+  const profileEmail =
+    rec.profile && typeof rec.profile.email === 'string' && rec.profile.email.trim().length > 0
+      ? rec.profile.email.trim()
+      : null;
+  return { responseType, idToken, accessToken, profileEmail };
+}
+
+function decodeBase64UrlUtf8(segment: string): string {
+  const padded = segment.replace(/-/g, '+').replace(/_/g, '/') + '==='.slice((segment.length + 3) % 4);
+  if (typeof globalThis.atob === 'function') {
+    const bin = globalThis.atob(padded);
+    const bytes = Uint8Array.from(bin, (ch) => ch.charCodeAt(0));
+    return new TextDecoder().decode(bytes);
+  }
+  return Buffer.from(padded, 'base64').toString('utf8');
+}
+
+export function inspectIdTokenClaimsSafely(
+  idToken: string | null | undefined,
+  expectedAudience: string
+): SafeIdTokenClaimsSummary {
+  if (!idToken || typeof idToken !== 'string') {
+    return {
+      validFormat: false,
+      aud: null,
+      audMatchesExpected: false,
+      iss: null,
+      email: null,
+      emailVerified: null,
+      expired: null,
+      expiresAtIso: null,
+    };
+  }
+  const parts = idToken.split('.');
+  if (parts.length !== 3 || !parts[0] || !parts[1] || !parts[2]) {
+    return {
+      validFormat: false,
+      aud: null,
+      audMatchesExpected: false,
+      iss: null,
+      email: null,
+      emailVerified: null,
+      expired: null,
+      expiresAtIso: null,
+    };
+  }
+  try {
+    const payload = JSON.parse(decodeBase64UrlUtf8(parts[1])) as Record<string, unknown>;
+    const aud = typeof payload.aud === 'string' ? payload.aud : null;
+    const iss = typeof payload.iss === 'string' ? payload.iss : null;
+    const email = typeof payload.email === 'string' ? payload.email : null;
+    const emailVerified =
+      typeof payload.email_verified === 'boolean' ? payload.email_verified : null;
+    const expSec = typeof payload.exp === 'number' ? payload.exp : null;
+    const expired = expSec !== null ? Date.now() / 1000 >= expSec : null;
+    const expiresAtIso = expSec !== null ? new Date(expSec * 1000).toISOString() : null;
+    return {
+      validFormat: true,
+      aud,
+      audMatchesExpected: Boolean(aud && expectedAudience && aud === expectedAudience),
+      iss,
+      email,
+      emailVerified,
+      expired,
+      expiresAtIso,
+    };
+  } catch {
+    return {
+      validFormat: false,
+      aud: null,
+      audMatchesExpected: false,
+      iss: null,
+      email: null,
+      emailVerified: null,
+      expired: null,
+      expiresAtIso: null,
+    };
+  }
+}
+
 export function snapshotFirebaseUser(user: User | null | undefined): AuthUserSnapshot {
   if (!user) {
     return {
@@ -120,6 +271,7 @@ export function snapshotFirebaseUser(user: User | null | undefined): AuthUserSna
 export function createInitialDiagnostics(isNative: boolean): AuthDiagnosticState {
   return {
     platform: isNative ? 'capacitor-native' : 'web',
+    nativeAndroid: isNative ? readNativeAndroidDiagnostics() : null,
     currentUserBefore: null,
     currentUserAfter: null,
     lastAuthStateUser: null,
@@ -139,6 +291,7 @@ export function loadAuthDiagnostics(isNative: boolean): AuthDiagnosticState {
       ...base,
       ...parsed,
       platform: isNative ? 'capacitor-native' : 'web',
+      nativeAndroid: base.nativeAndroid ?? parsed.nativeAndroid ?? null,
       events: Array.isArray(parsed.events) ? parsed.events.slice(-MAX_EVENTS) : [],
     };
   } catch {
@@ -271,6 +424,18 @@ export function formatDiagnosticReport(
     `آخر حالة onAuthStateChanged: ${state.lastAuthStateUser ? `${state.lastAuthStateUser.present} (${state.lastAuthStateUser.email ?? 'none'})` : 'لم يُستدعَ بعد'}`,
     `سبب عودة الجلسة إلى null: ${state.lastNullReason ?? 'لا يوجد'}`,
   ];
+
+  if (state.nativeAndroid) {
+    const na = state.nativeAndroid;
+    lines.push(
+      `تشخيص Android: pkg=${na.packageName} v${na.versionName}(${na.versionCode}) launchMode=${na.launchMode ?? 'unknown'}`,
+      `شهادة التوقيع SHA-1: ${na.signingSha1 ?? 'غير متاح'}`,
+      `شهادة التوقيع SHA-256: ${na.signingSha256 ?? 'غير متاح'}`,
+      `Google Play Services: installed=${na.playServicesInstalled}, version=${na.playServicesVersion ?? 'none'}`,
+      `google-services.json res: default_web_client_id=${na.hasDefaultWebClientIdRes} (matches=${na.defaultWebClientIdMatches}, suffix=${na.defaultWebClientIdSuffix ?? 'none'}), google_app_id=${na.hasGoogleAppIdRes}`,
+      `تكامل SocialLogin: pluginLoaded=${na.socialLoginPluginLoaded}, modifiedMainActivity=${na.implementsModifiedMainActivity}`
+    );
+  }
 
   if (state.lastFailure) {
     lines.push(

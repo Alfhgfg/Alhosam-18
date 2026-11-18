@@ -128,7 +128,19 @@ jobs:
               console.error("Invalid google-services.json:", { proj, appId, pkg });
               process.exit(1);
             }
-            console.log("Verified google-services.json:", { proj, appId, pkg });
+            const oauthClients = gs?.client?.[0]?.oauth_client || [];
+            const androidClients = oauthClients.filter((c) => c.client_type === 1);
+            const webClients = oauthClients.filter((c) => c.client_type === 3);
+            console.log("Verified google-services.json:", {
+              proj,
+              appId,
+              pkg,
+              androidOAuthCount: androidClients.length,
+              webOAuthCount: webClients.length,
+            });
+            if (androidClients.length === 0) {
+              console.log("::warning::google-services.json has no Android OAuth client (client_type=1) for com.alhussam.grocery. Ensure SHA-1 96:63:30:BB:ED:0C:CB:D8:17:53:76:FD:F5:7C:76:09:54:8C:E7:EC is registered in Firebase / Google Cloud Console.");
+            }
           '
 
       - name: Configure Release Signing (without exposing secrets)
